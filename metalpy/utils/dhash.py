@@ -29,6 +29,7 @@ def register_dhasher(*hashed_types):
         for t in hashed_types:
             DHash.hashers[t] = func
         return func
+
     return wrapper
 
 
@@ -36,6 +37,7 @@ def register_lazy_dhasher(hashed_type: str):
     def wrapper(func):
         DHash.hasher_creators[hashed_type] = func
         return func
+
     return wrapper
 
 
@@ -104,7 +106,11 @@ class DHash:
         return self.digest()
 
     def __eq__(self, other):
-        return isinstance(other, DHash) and self.result == other.result
+        if isinstance(other, DHash):
+            val = other.result
+        else:
+            val = other
+        return val == self.result
 
     @staticmethod
     def convert_to_dhashable(obj):
@@ -118,7 +124,9 @@ class DHash:
                 hasher = DHash._find_lazy_hasher(t)
 
         if hasher is None:
-            def fallback(x): DHash(x, convert=False)
+            def fallback(x):
+                DHash(x, convert=False)
+
             hasher = getattr(t, '__dhash__', fallback)
             if hasher == fallback:
                 warnings.warn(f'Cannot find dhasher for type `{t.__name__}`,'
@@ -140,8 +148,38 @@ class DHash:
         return hasher
 
 
-@register_dhasher(*itertools.chain(*[np.sctypes[k] for k in np.sctypes if k != 'others']))
-@register_dhasher(float, int, bool)
+def _check_dhashable(t: type):
+    """初步检查类型是否支持确定性哈希（只检查零值的哈希值是否唯一，即存在自行定义的哈希函数）
+    """
+    d_hashable = False
+    try:
+        a, b = t(), t()
+        d_hashable = hash(a) == hash(b)
+    except TypeError:
+        d_hashable = False
+    finally:
+        return d_hashable
+
+
+# 移除 np.sctypes 引用，改为硬编码基础类型检查结合自动获取其他类型
+# reference: https://github.com/numpy/numpy/issues/26778
+NUMPY_BASE_TYPES = {
+    np.int8, np.int16, np.int32, np.int64, np.intp, np.intc,
+    np.uint8, np.uint16, np.uint32, np.uint64, np.uintp, np.uintc,
+    np.float16, np.float32, np.float64,
+    np.complex64, np.complex128,
+    np.datetime64, np.timedelta64,
+}  # 直接检查保证基本类型存在（默认支持确定性哈希）
+
+NUMPY_SUPPORTED_TYPES = {
+    t
+    for t in np.sctypeDict.values()
+    if t.__module__ == np.__name__ and _check_dhashable(t)
+} | NUMPY_BASE_TYPES  # 检查其他支持确定性哈希的类型
+
+
+@register_dhasher(*NUMPY_SUPPORTED_TYPES)
+@register_dhasher(bool, int, float, complex)
 def _hash_basic_type(obj):
     return DHash(obj, convert=False)
 
@@ -196,7 +234,7 @@ def _hash_serializable(obj):
 def _hash_array(arr: np.ndarray, n_samples=10, sparse=False):
     if not sparse:
         arr = arr.ravel()
-        rand = np.random.RandomState(int(arr[len(arr) // 2]) % 2**32)
+        rand = np.random.RandomState(int(arr[len(arr) // 2]) % 2 ** 32)
         n_samples = min(n_samples, len(arr))
 
         # 加入shape作为参数防止类似np.ones(100)和np.ones(1000)的冲突
